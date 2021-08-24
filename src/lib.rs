@@ -26,8 +26,12 @@ impl OpenBCI {
         Self { port }
     }
 
+    // TODO: This needs better error handling
     pub fn start(mut self) -> (Receiver<Reading>, JoinHandle<()>) {
         let (sender, receiver) = channel();
+        self.port
+            .write_all(&[0x76, 0x0A])
+            .expect("Couldn't write value");
         let thread = thread::spawn(move || {
             self.port
                 .write_all(&[0x62, 0x0A])
@@ -65,11 +69,11 @@ impl OpenBCI {
                     // packets out of order somehow and need to just discard this packet. The
                     // discarding happens by virtue of not processing it but it still being removed
                     // by the line above.
-                    if packet.sample_number % 2 == 1 && packets[0].is_none() {
+                    if packet.sample_number % 2 == 0 && packets[0].is_none() {
                         continue;
-                    } else if packet.sample_number % 2 == 0 && packets[0].is_none() {
+                    } else if packet.sample_number % 2 == 1 && packets[0].is_none() {
                         packets[0] = Some(packet);
-                    } else if packet.sample_number % 2 == 1 && packets[1].is_none() {
+                    } else if packet.sample_number % 2 == 0 && packets[1].is_none() {
                         packets[1] = Some(packet);
                     }
 
