@@ -6,32 +6,105 @@ use std::{
 };
 
 use {
+    ascii::AsciiChar,
     serde::{Deserialize, Serialize},
     serialport::{new as new_port, SerialPort},
 };
 
 pub struct OpenBCI {
     port: Box<dyn SerialPort>,
+    shutdown: bool,
 }
 
-// TODO: At the moment I do not provide a way to configure the headset from this library. I
-// configure it with the OpenBCI GUI and then use this. Hacky, but works.
 impl OpenBCI {
-    pub fn new() -> Self {
-        // TODO: I should really make this come from a config, but you know how it is
-        let port = new_port("/dev/tty.usbserial-DM025943", 115_200)
+    pub fn new(serial_device: &str) -> Self {
+        let port = new_port(serial_device, 115_200)
             .timeout(Duration::from_millis(1000))
             .open()
             .expect("Failed to open port");
-        Self { port }
+        Self {
+            port,
+            shutdown: false,
+        }
+    }
+
+    // TODO: This should be configurable by the developer
+    pub fn setup(&mut self) {
+        let commands = [
+            (
+                AsciiChar::from_ascii('v').unwrap(),
+                String::from("Firmware: v3.1.2"),
+            ), // Reset Headset
+            (AsciiChar::from_ascii('C').unwrap(), String::from("16$$$")), // Set to 16 channel mode
+        ];
+
+        let channels = [
+            AsciiChar::from_ascii('1').unwrap(), // Enable board channel 1
+            AsciiChar::from_ascii('2').unwrap(), // Enable board channel 2
+            AsciiChar::from_ascii('3').unwrap(), // Enable board channel 3
+            AsciiChar::from_ascii('4').unwrap(), // Enable board channel 4
+            AsciiChar::from_ascii('5').unwrap(), // Enable board channel 5
+            AsciiChar::from_ascii('6').unwrap(), // Enable board channel 6
+            AsciiChar::from_ascii('7').unwrap(), // Enable board channel 7
+            AsciiChar::from_ascii('8').unwrap(), // Enable board channel 8
+            AsciiChar::from_ascii('Q').unwrap(), // Enable daisy channel 1
+            AsciiChar::from_ascii('W').unwrap(), // Enable daisy channel 2
+            AsciiChar::from_ascii('E').unwrap(), // Enable daisy channel 3
+            AsciiChar::from_ascii('R').unwrap(), // Enable daisy channel 4
+            AsciiChar::from_ascii('T').unwrap(), // Enable daisy channel 5
+            AsciiChar::from_ascii('Y').unwrap(), // Enable daisy channel 6
+            AsciiChar::from_ascii('U').unwrap(), // Enable daisy channel 7
+            AsciiChar::from_ascii('I').unwrap(), // Enable daisy channel 8
+        ];
+
+        let channel_settings = [
+            AsciiChar::from_ascii('0').unwrap(), // Set channel to ON
+            AsciiChar::from_ascii('6').unwrap(), // Set channel to Gain 24
+            AsciiChar::from_ascii('0').unwrap(), // Set channel input type set to ADSINPUT_NORMA
+            AsciiChar::from_ascii('1').unwrap(), // Set channel bias set to include
+            AsciiChar::from_ascii('1').unwrap(), // Set channel SRB2 to connect
+            AsciiChar::from_ascii('0').unwrap(), // Set channel SRB1 to disconnect
+        ];
+
+        for (command, expect) in commands.iter() {
+            self.port
+                .write_all(&[command.as_byte(), 0x0A])
+                .expect("Couldn't write value");
+            let mut buffer = String::new();
+            self.port
+                .read_to_string(&mut buffer)
+                .expect("Couldn't read from port");
+            if !buffer.contains(expect) {
+                panic!("Didn't receive expected output");
+            }
+        }
+
+        let mut channel_write = vec![];
+        for channel in channels.iter() {
+            channel_write.push(AsciiChar::from_ascii('x').unwrap().as_byte());
+            channel_write.push(channel.as_byte());
+            for channel_setting in channel_settings.iter() {
+                channel_write.push(channel_setting.as_byte());
+            }
+            channel_write.push(AsciiChar::from_ascii('X').unwrap().as_byte());
+        }
+        channel_write.push(0x0A);
+        self.port
+            .write_all(&channel_write)
+            .expect("Couldn't write value");
+
+        let mut buffer = String::new();
+        self.port
+            .read_to_string(&mut buffer)
+            .expect("Couldn't read from port");
+        if !buffer.contains(&String::from("Channel set for 16$$$")) {
+            panic!("Didn't receive expected output");
+        }
     }
 
     // TODO: This needs better error handling
     pub fn start(mut self) -> (Receiver<Reading>, JoinHandle<()>) {
         let (sender, receiver) = channel();
-        self.port
-            .write_all(&[0x76, 0x0A])
-            .expect("Couldn't write value");
         let thread = thread::spawn(move || {
             self.port
                 .write_all(&[0x62, 0x0A])
@@ -41,6 +114,13 @@ impl OpenBCI {
             let mut packets: [Option<Packet>; 2] = Default::default();
 
             loop {
+                if self.shutdown == true {
+                    self.port
+                        .write_all(&[0x73, 0x0A])
+                        .expect("Couldn't write value");
+                    break;
+                }
+
                 let mut temp_buffer: [u8; 64] = [0; 64];
                 self.port
                     .read(&mut temp_buffer)
@@ -81,7 +161,9 @@ impl OpenBCI {
                         let packets = [packets[0].take().unwrap(), packets[1].take().unwrap()];
                         let reading = Reading::from_packets(packets);
 
-                        sender.send(reading).unwrap();
+                        sender
+                            .send(reading)
+                            .expect("Couldn't send reading. Channel closed?");
                     }
                 }
             }
@@ -93,9 +175,8 @@ impl OpenBCI {
 
 impl Drop for OpenBCI {
     fn drop(&mut self) {
-        self.port
-            .write_all(&[0x73, 0x0A])
-            .expect("Couldn't write value");
+        println!("Ran drop.");
+        self.shutdown = true;
     }
 }
 
@@ -137,7 +218,7 @@ impl Packet {
 }
 
 // TODO: Need to make this available for varied channel count
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct Reading {
     pub sample_numbers: (u8, u8),
     pub chan_1: i32,
